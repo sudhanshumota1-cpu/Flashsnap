@@ -1086,13 +1086,21 @@ function buildDeckDOM(){
   html+=`</div>`;
   container.innerHTML=html;
 
-  // Setup zoom for image cards
+  // Setup zoom + SET IMAGE SRC for image cards
   if(deckScreenshotData){
     for(let i=deckIdx;i<=Math.min(deckIdx+2,deckCards.length-1);i++){
       const card=deckCards[i];
       if(card.type==='image'){
         const zone=document.getElementById(`iz-${i}`);
         const imgEl=document.getElementById(`zimg-${i}`);
+        if(imgEl){
+          // Fix: actually set the image source so it renders
+          imgEl.src=deckScreenshotData;
+          imgEl.onerror=function(){
+            // fallback: try loading as-is if src assignment fails
+            if(imgEl.src!==deckScreenshotData) imgEl.src=deckScreenshotData;
+          };
+        }
         if(zone && imgEl) setupZoom(zone, imgEl);
       }
     }
