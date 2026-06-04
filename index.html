@@ -474,6 +474,16 @@ body{padding-bottom:80px;}
   </div>
   <button class="btn-primary" onclick="saveApiKey()">💾 Key Save Karo</button>
   <div class="api-saved" id="api-saved">✅ Saved!</div>
+
+  <!-- BACKUP SECTION -->
+  <div style="margin-top:24px;background:#0d1a0d;border:1px solid #1a3a1a;border-radius:14px;padding:16px;">
+    <div style="font-size:13px;font-weight:700;color:#4ade80;margin-bottom:4px;">💾 Data Backup & Restore</div>
+    <div style="font-size:11px;color:#5a8a5a;margin-bottom:14px;line-height:1.6;">⚠️ Saara data sirf is browser mein hai. Weekly backup lo — exam ke time kaam aayega!</div>
+    <button class="btn-primary" onclick="exportFlashSnapData()" style="background:linear-gradient(135deg,#059669,#0d9488);margin-bottom:10px;width:100%;">📥 Export Backup (.json)</button>
+    <button class="btn-primary" onclick="document.getElementById('import-file-input').click()" style="background:linear-gradient(135deg,#2563eb,#0891b2);width:100%;">📤 Import Backup</button>
+    <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importFlashSnapData(event)"/>
+    <div id="backup-msg" style="margin-top:10px;font-size:12px;color:#4ade80;display:none;"></div>
+  </div>
 </div>
 
 <!-- EDIT CARD MODAL -->
@@ -594,6 +604,13 @@ body{padding-bottom:80px;}
 </div>
 
 <script>
+// Global error catcher - shows error instead of blank screen
+window.onerror = function(msg, src, line, col, err) {
+  document.body.style.cssText = 'background:#0a0a12;color:#f87171;font-family:monospace;padding:20px;';
+  document.body.innerHTML = '<h2 style="color:#a78bfa">🩺 FlashSnap Error</h2><p style="margin:12px 0;color:#f87171">JS Error:</p><pre style="background:#1a0a0a;padding:12px;border-radius:8px;font-size:12px;white-space:pre-wrap">' + msg + '\nLine: ' + line + '\n' + (err ? err.stack : '') + '</pre><p style="margin-top:12px;font-size:12px;color:#5a6880">Hard refresh karo: URL bar mein jaake Enter dabaao</p>';
+  return false;
+};
+
 const STORAGE_KEY='flashsnap_v9';
 const API_KEY_STORAGE='flashsnap_gemini_apikey';
 const SCORES_KEY='flashsnap_scores_v9';
@@ -1954,4 +1971,333 @@ function setEditType(type){
 }
 
 function saveEditedCard(){
-  const q = document.getElementById('edit-q').value.trim(
+  const q = document.getElementById('edit-q').value.trim();
+  const a = document.getElementById('edit-a').value.trim();
+  if(!q || !a){ alert('Question aur answer dono daalo!'); return; }
+  if(editCardIdx === null) return;
+
+  // FIX: Save OLD question/answer BEFORE updating deckCards
+  // so saveCardEdit can find the card in localStorage by original values
+  const origQ = deckCards[editCardIdx].question;
+  const origA = deckCards[editCardIdx].answer;
+
+  // Save to localStorage using original values to find the card
+  saveCardEdit(editCardIdx, q, a, editCardType, origQ, origA);
+
+  // NOW update deckCards in memory
+  deckCards[editCardIdx].question = q;
+  deckCards[editCardIdx].answer = a;
+  deckCards[editCardIdx].type = editCardType;
+
+  document.getElementById('edit-modal-overlay').classList.remove('open');
+  editCardIdx = null;
+
+  // Rebuild current card view
+  buildDeckDOM();
+}
+
+function deleteCardFromEdit(){
+  if(editCardIdx === null) return;
+  if(!confirm('Is card ko permanently delete karo?')) return;
+
+  // Remove from subject in localStorage
+  deleteCardPermanently(editCardIdx);
+
+  document.getElementById('edit-modal-overlay').classList.remove('open');
+  editCardIdx = null;
+  deckIdx = Math.min(deckIdx, deckCards.length - 1);
+  buildDeckDOM();
+}
+
+function saveCardEdit(idx, q, a, type, origQ, origA){
+  if(!deckSubjectKey) return;
+  const subjects = getSubjects();
+  const s = subjects[deckSubjectKey];
+  if(!s) return;
+  // FIX: Use passed origQ/origA to find card, not deckCards[idx] which may already be updated
+  const searchQ = origQ !== undefined ? origQ : deckCards[idx].question;
+  const searchA = origA !== undefined ? origA : deckCards[idx].answer;
+  const cardIdx = s.cards.findIndex(c => c.question === searchQ && c.answer === searchA);
+  if(cardIdx !== -1){
+    s.cards[cardIdx].question = q;
+    s.cards[cardIdx].answer = a;
+    s.cards[cardIdx].type = type;
+    saveSubjectsData(subjects);
+    console.log('✅ Card saved to localStorage at index', cardIdx);
+  } else {
+    // Fallback: try finding by index position if question match fails
+    console.warn('Card not found by question match, trying index fallback');
+    if(s.cards[idx]){
+      s.cards[idx].question = q;
+      s.cards[idx].answer = a;
+      s.cards[idx].type = type;
+      saveSubjectsData(subjects);
+      console.log('✅ Card saved via index fallback');
+    }
+  }
+}
+
+function deleteCardPermanently(idx){
+  if(!deckSubjectKey) return;
+  const subjects = getSubjects();
+  const s = subjects[deckSubjectKey];
+  if(!s) return;
+  const origCard = deckCards[idx];
+  s.cards = s.cards.filter(c => !(c.question === origCard.question && c.answer === origCard.answer));
+  saveSubjectsData(subjects);
+  deckCards.splice(idx, 1);
+}
+
+// ── MANUAL CARD CREATOR ──
+let manualType = 'fact';
+let manualTempCards = [];
+
+function populateManualSubjects(){
+  const sel = document.getElementById('manual-subject-select');
+  if(!sel) return;
+  const subjects = getSubjects();
+  const folders = getFolders();
+  const keys = Object.keys(subjects);
+  sel.innerHTML = '<option value="">-- Subject select karo --</option>';
+
+  // Group by folder
+  const folderKeys = Object.keys(folders);
+  const folderedMap = {};
+  folderKeys.forEach(fk => {
+    (folders[fk].subjectKeys||[]).forEach(sk => { folderedMap[sk] = folders[fk].name; });
+  });
+
+  // Add with folder names
+  keys.forEach(k => {
+    const s = subjects[k];
+    const folderName = folderedMap[k] ? ` [${folderedMap[k]}]` : '';
+    sel.innerHTML += `<option value="${k}">${s.emoji} ${s.name}${folderName}</option>`;
+  });
+  sel.innerHTML += `<option value="__new__">➕ Naya Subject banao</option>`;
+}
+
+function setManualType(type){
+  manualType = type;
+  ['fact','concept','image'].forEach(t => {
+    const el = document.getElementById(`mtype-${t}`);
+    if(el) el.classList.toggle('active', t === type);
+  });
+  updateManualPreview();
+}
+
+function updateManualPreview(){
+  const q = document.getElementById('manual-q').value.trim();
+  const a = document.getElementById('manual-a').value.trim();
+  const pq = document.getElementById('preview-q');
+  const pa = document.getElementById('preview-a');
+  if(pq) pq.textContent = q || 'Question yahan dikhega...';
+  if(pa) pa.textContent = a || 'Answer';
+}
+
+function updateCharCount(inputId, countId, max){
+  const el = document.getElementById(inputId);
+  const ct = document.getElementById(countId);
+  if(el && ct) ct.textContent = `${el.value.length}/${max}`;
+}
+
+function saveManualCard(){
+  const selEl = document.getElementById('manual-subject-select');
+  const q = document.getElementById('manual-q').value.trim();
+  const a = document.getElementById('manual-a').value.trim();
+  const errEl = document.getElementById('manual-error');
+
+  if(!q){ errEl.textContent='Question daalo!'; errEl.style.display='block'; return; }
+  if(!a){ errEl.textContent='Answer daalo!'; errEl.style.display='block'; return; }
+  if(!selEl.value){ errEl.textContent='Subject select karo!'; errEl.style.display='block'; return; }
+
+  // Check answer word count
+  if(a.split(/\s+/).length > 6){ errEl.textContent='Answer zyada lamba hai — max 4-5 words!'; errEl.style.display='block'; return; }
+
+  errEl.style.display='none';
+
+  const card = { question: q, answer: a, type: manualType, manual: true };
+  manualTempCards.push(card);
+
+  // Show saved list
+  renderManualSavedList();
+  document.getElementById('manual-saved-wrap').style.display='block';
+
+  // Clear inputs for next card
+  document.getElementById('manual-q').value='';
+  document.getElementById('manual-a').value='';
+  updateManualPreview();
+  updateCharCount('manual-q','qcount',150);
+  document.getElementById('manual-q').focus();
+}
+
+function renderManualSavedList(){
+  const list = document.getElementById('manual-saved-list');
+  const label = document.getElementById('manual-saved-label');
+  if(!list) return;
+  if(label) label.textContent = `${manualTempCards.length} card${manualTempCards.length>1?'s':''} ready`;
+  list.innerHTML = manualTempCards.map((c,i) => `
+    <div class="saved-card-item">
+      <div class="saved-card-info">
+        <div class="saved-card-q">${escapeHtml(c.question)}</div>
+        <div class="saved-card-a">→ ${escapeHtml(c.answer)}</div>
+      </div>
+      <button class="saved-card-del" onclick="deleteManualCard(${i})">🗑</button>
+    </div>
+  `).join('');
+}
+
+function deleteManualCard(i){
+  manualTempCards.splice(i,1);
+  if(manualTempCards.length === 0){
+    document.getElementById('manual-saved-wrap').style.display='none';
+  } else {
+    renderManualSavedList();
+  }
+}
+
+function finalizeManualCards(){
+  const selEl = document.getElementById('manual-subject-select');
+  if(!selEl.value){ alert('Subject select karo!'); return; }
+  if(!manualTempCards.length){ alert('Pehle cards banao!'); return; }
+
+  if(selEl.value === '__new__'){
+    const newName = prompt('Naya subject naam daalo:');
+    if(!newName) return;
+    const subjects = getSubjects();
+    const idx = Object.keys(subjects).length;
+    const key = newName.toLowerCase().replace(/\s+/g,'-')+'-'+Date.now();
+    subjects[key] = {
+      name: newName,
+      emoji: EMOJIS[idx % EMOJIS.length],
+      color: COLORS[idx % COLORS.length],
+      date: new Date().toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}),
+      cards: [...manualTempCards],
+      screenshotData: null
+    };
+    saveSubjectsData(subjects);
+    alert(`✅ ${manualTempCards.length} cards "${newName}" mein save ho gaye!`);
+  } else {
+    const subjects = getSubjects();
+    const s = subjects[selEl.value];
+    if(!s){ alert('Subject nahi mila!'); return; }
+    s.cards = [...s.cards, ...manualTempCards];
+    saveSubjectsData(subjects);
+    alert(`✅ ${manualTempCards.length} cards "${s.name}" mein add ho gaye! Total: ${s.cards.length}`);
+  }
+
+  manualTempCards = [];
+  document.getElementById('manual-saved-wrap').style.display='none';
+  document.getElementById('manual-q').value='';
+  document.getElementById('manual-a').value='';
+  updateManualPreview();
+  showScreen('home');
+}
+
+function clearManualForm(){
+  document.getElementById('manual-q').value='';
+  document.getElementById('manual-a').value='';
+  updateManualPreview();
+  updateCharCount('manual-q','qcount',150);
+}
+
+// ── EXPORT / IMPORT ──────────────────────────────────────────────────────
+function exportFlashSnapData(){
+  const data = {
+    version: "flashsnap-v9",
+    exportDate: new Date().toISOString(),
+    subjects: JSON.parse(localStorage.getItem(STORAGE_KEY)||'{}'),
+    scores: JSON.parse(localStorage.getItem(SCORES_KEY)||'{}'),
+    folders: JSON.parse(localStorage.getItem(FOLDER_KEY)||'{}'),
+    apiKey: localStorage.getItem(API_KEY_STORAGE)||''
+  };
+  const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'FlashSnap_Backup_' + new Date().toISOString().split('T')[0] + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  const msg = document.getElementById('backup-msg');
+  if(msg){ msg.style.display='block'; msg.textContent='✅ Backup downloaded! Downloads folder mein dekho.'; }
+}
+
+function importFlashSnapData(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev){
+    try {
+      const data = JSON.parse(ev.target.result);
+      if(!data.subjects && !data.version){ alert('❌ Invalid backup file!'); return; }
+      if(!confirm('Purana data replace ho jaayega. Sure ho?')) return;
+      if(data.subjects) localStorage.setItem(STORAGE_KEY, JSON.stringify(data.subjects));
+      if(data.scores) localStorage.setItem(SCORES_KEY, JSON.stringify(data.scores));
+      if(data.folders) localStorage.setItem(FOLDER_KEY, JSON.stringify(data.folders));
+      if(data.apiKey){ localStorage.setItem(API_KEY_STORAGE, data.apiKey); const inp=document.getElementById('api-key-input'); if(inp) inp.value=data.apiKey; }
+      const msg = document.getElementById('backup-msg');
+      if(msg){ msg.style.display='block'; msg.style.color='#4ade80'; msg.textContent='✅ Data import ho gaya! Subjects tab mein dekho.'; }
+      setTimeout(()=>{ renderHome(); showScreen('home'); }, 1200);
+    } catch(err){ alert('❌ Error: ' + err.message); }
+  };
+  reader.readAsText(file);
+  e.target.value='';
+}
+
+try {
+  renderHome();
+  setupLongPress();
+} catch(e) {
+  document.body.style.cssText = 'background:#0a0a12;color:#f87171;font-family:monospace;padding:20px;';
+  document.body.innerHTML = '<h2 style="color:#a78bfa">🩺 FlashSnap Startup Error</h2><pre style="background:#1a0a0a;padding:12px;border-radius:8px;font-size:12px;white-space:pre-wrap">' + e.message + '\n' + e.stack + '</pre>';
+}
+const sv=getApiKey();if(sv)document.getElementById('api-key-input').value=sv;
+if('Notification' in window && Notification.permission==='granted') checkPendingReminders();
+
+// PWA Install prompt
+let deferredPrompt = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredPrompt = e;
+  showInstallBanner();
+});
+
+function showInstallBanner(){
+  const existing = document.getElementById('install-banner');
+  if(existing) return;
+  const banner = document.createElement('div');
+  banner.id = 'install-banner';
+  banner.style.cssText = `
+    position:fixed;bottom:85px;left:16px;right:16px;z-index:200;
+    background:linear-gradient(135deg,#1a1a2e,#0f0f1a);
+    border:1px solid rgba(66,133,244,.4);border-radius:16px;
+    padding:14px 16px;display:flex;align-items:center;gap:12px;
+    box-shadow:0 8px 32px rgba(0,0,0,.4);animation:slideUp .3s ease;
+  `;
+  banner.innerHTML = `
+    <div style="font-size:1.8rem">🎴</div>
+    <div style="flex:1">
+      <div style="font-family:'Syne',sans-serif;font-size:.9rem;font-weight:700;color:#f0ece4">FlashSnap Install Karo!</div>
+      <div style="font-size:.72rem;color:#44445a;margin-top:2px">Home screen pe app jaisa kaam karega</div>
+    </div>
+    <button onclick="installApp()" style="background:#4285f4;color:#fff;border:none;border-radius:10px;padding:8px 14px;font-family:'Outfit',sans-serif;font-size:.8rem;font-weight:600;cursor:pointer;">Install</button>
+    <button onclick="document.getElementById('install-banner').remove()" style="background:none;border:none;color:#44445a;font-size:1.1rem;cursor:pointer;padding:4px;">✕</button>
+  `;
+  document.body.appendChild(banner);
+}
+
+async function installApp(){
+  if(!deferredPrompt) return;
+  deferredPrompt.prompt();
+  const result = await deferredPrompt.userChoice;
+  deferredPrompt = null;
+  const banner = document.getElementById('install-banner');
+  if(banner) banner.remove();
+}
+
+// Add slideUp animation
+const style = document.createElement('style');
+style.textContent = '@keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}';
+document.head.appendChild(style);
+</script>
+</body>
+</html>
